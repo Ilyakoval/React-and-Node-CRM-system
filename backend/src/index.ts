@@ -1,9 +1,6 @@
-import express from 'express';
-import cors from 'cors';
 import { initPostgres, connectMongo, pgPool } from './config/database';
 import { env } from './config/env';
-import authRoutes from './routes/auth.routes';
-import projectRoutes from './routes/project.routes';
+import { createApp } from './app';
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
@@ -15,15 +12,7 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1);
 });
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-app.use('/api/auth', authRoutes);
-app.use('/api/projects', projectRoutes);
-
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+const app = createApp();
 
 async function bootstrap(): Promise<void> {
   await connectMongo();

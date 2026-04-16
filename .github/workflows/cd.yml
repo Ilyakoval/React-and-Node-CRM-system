@@ -1,0 +1,95 @@
+name: CD
+
+# Runs only after CI passes on main
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Build Docker images and push to GitHub Container Registry
+  # ─────────────────────────────────────────────────────────────
+  publish:
+    name: Build & push Docker images
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # Checkout the exact SHA that CI tested, not whatever HEAD is now
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/github-crm-backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to:   type=gha,scope=backend,mode=max
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/github-crm-frontend:latest
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,scope=frontend,mode=max
+
+  # ─────────────────────────────────────────────────────────────
+  # SSH into the server, pull new images and restart containers
+  #
+  # Required repository secrets:
+  #   DEPLOY_HOST     – server IP or hostname
+  #   DEPLOY_USER     – SSH username (e.g. ubuntu)
+  #   DEPLOY_SSH_KEY  – private SSH key (the matching public key
+  #                     must be in ~/.ssh/authorized_keys on the server)
+  #
+  # The server must have:
+  #   - Docker + Docker Compose plugin installed
+  #   - /opt/github-crm/docker-compose.yml (copy from repo)
+  #   - /opt/github-crm/.env with production secrets
+  #   - `docker login ghcr.io` already done (or use a CR_PAT secret)
+  # ─────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+    needs: publish
+
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/github-crm
+
+            # Pull the freshly-built images from GHCR
+            docker compose pull backend frontend
+
+            # Recreate only changed containers; keep DB volumes intact
+            docker compose up -d --remove-orphans
+
+            # Remove dangling images to save disk space
+            docker image prune -f
